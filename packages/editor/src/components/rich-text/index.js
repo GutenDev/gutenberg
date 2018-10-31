@@ -48,7 +48,6 @@ import {
 	replace,
 } from '@wordpress/rich-text';
 import { decodeEntities } from '@wordpress/html-entities';
-import deprecated from '@wordpress/deprecated';
 
 /**
  * Internal dependencies
@@ -90,14 +89,6 @@ export class RichText extends Component {
 			this.multilineWrapperTags = [ 'ul', 'ol' ];
 		}
 
-		if ( this.props.onSplit ) {
-			deprecated( 'wp.editor.RichText onSplit prop', {
-				version: '4.2',
-				alternative: 'onInsertAfter and onPasteBlocks',
-				plugin: 'Gutenberg',
-			} );
-		}
-
 		this.onInit = this.onInit.bind( this );
 		this.getSettings = this.getSettings.bind( this );
 		this.onSetup = this.onSetup.bind( this );
@@ -121,6 +112,7 @@ export class RichText extends Component {
 		this.valueToFormat = this.valueToFormat.bind( this );
 		this.setRef = this.setRef.bind( this );
 		this.isActive = this.isActive.bind( this );
+		this.onSplit = this.onSplit.bind( this );
 
 		this.formatToValue = memize( this.formatToValue.bind( this ), { size: 1 } );
 
@@ -347,7 +339,7 @@ export class RichText extends Component {
 			if ( shouldReplace ) {
 				// Necessary to allow the paste bin to be removed without errors.
 				this.props.setTimeout( () => this.props.onReplace( content ) );
-			} else if ( this.props.onInsertAfter ) {
+			} else {
 				// Necessary to get the right range.
 				// Also done in the TinyMCE paste plugin.
 				this.props.setTimeout( () => this.onPasteBlocks( content ) );
@@ -377,8 +369,7 @@ export class RichText extends Component {
 		}
 
 		const canReplace = this.props.onReplace && this.isEmpty();
-		const canInsertAfter = !! this.props.onInsertAfter;
-		const canPasteBlocks = !! this.props.onPasteBlocks && canInsertAfter;
+		const canPasteBlocks = !! this.props.onSplit && this.props.onReplace;
 
 		let mode = 'INLINE';
 
@@ -624,7 +615,8 @@ export class RichText extends Component {
 	 */
 	onKeyDown( event ) {
 		const { keyCode } = event;
-		const { onInsertAfter } = this.props;
+		const { onReplace, onSplit } = this.props;
+		const canSplit = onReplace && onSplit;
 
 		const isHorizontalNavigation = keyCode === LEFT || keyCode === RIGHT;
 		if ( isHorizontalNavigation ) {
@@ -672,7 +664,7 @@ export class RichText extends Component {
 		}
 
 		// If we click shift+Enter on inline RichTexts, we avoid creating two contenteditables
-		// We also split the content and call the onInsertAfter prop if provided.
+		// We also split the content and call the onSplit prop if provided.
 		if ( keyCode === ENTER ) {
 			event.preventDefault();
 			// It's important that we stop other handlers (e.g. ones registered
@@ -696,14 +688,12 @@ export class RichText extends Component {
 			}
 
 			if ( this.multilineTag ) {
-				if ( onInsertAfter && isEmptyLine( record ) ) {
-					const [ before, after ] = split( record );
-					onInsertAfter( this.valueToFormat( after ) );
-					this.onChange( before );
+				if ( canSplit && isEmptyLine( record ) ) {
+					this.onSplit( record );
 				} else {
 					this.onChange( insertLineSeparator( record ) );
 				}
-			} else if ( event.shiftKey || ! onInsertAfter ) {
+			} else if ( event.shiftKey || ! canSplit ) {
 				const text = getTextContent( record );
 				const length = text.length;
 				let toInsert = '\n';
@@ -720,11 +710,28 @@ export class RichText extends Component {
 
 				this.onChange( insert( record, toInsert ) );
 			} else {
-				const [ before, after ] = split( record );
-				onInsertAfter( this.valueToFormat( after ) );
-				this.onChange( before );
+				this.onSplit( record );
 			}
 		}
+	}
+
+	onSplit( record ) {
+		const { onReplace, onSplit, onSplitMiddle } = this.props;
+
+		if ( ! onReplace || ! onSplit ) {
+			return;
+		}
+
+		const [ before, after ] = split( record );
+		const blocks = [ onSplit( this.valueToFormat( before ) ) ];
+
+		if ( onSplitMiddle ) {
+			blocks.push( onSplitMiddle() );
+		}
+
+		blocks.push( onSplit( this.valueToFormat( after ) ) );
+
+		onReplace( blocks, 1 );
 	}
 
 	/**
@@ -780,30 +787,31 @@ export class RichText extends Component {
 	 *
 	 * Replaces the content of the editor inside this element with the contents
 	 * before the selection. Sends the elements after the selection to the
-	 * `onInsertAfter` handler.
+	 * `onSplit` handler.
 	 *
-	 * @param {Array}  blocks  The blocks to add after the split point.
-	 * @param {Object} context The context for splitting.
+	 * @param {Array}  pastedBlocks  The blocks to add after the split point.
 	 */
-	onPasteBlocks( blocks = [] ) {
-		const { onInsertAfter, onRemove, onPasteBlocks } = this.props;
-		const [ before, after ] = split( this.createRecord() );
+	onPasteBlocks( pastedBlocks = [] ) {
+		const { onReplace, onSplit } = this.props;
 
-		if ( ! onInsertAfter && ! onPasteBlocks ) {
+		if ( ! onReplace || ! onSplit ) {
 			return;
 		}
 
+		const [ before, after ] = split( this.createRecord() );
+		const blocks = [];
+
+		if ( ! isEmpty( before ) ) {
+			blocks.push( onSplit( this.valueToFormat( before ) ) );
+		}
+
+		blocks.push( ...pastedBlocks );
+
 		if ( ! isEmpty( after ) ) {
-			onInsertAfter( this.valueToFormat( after ) );
+			blocks.push( onSplit( this.valueToFormat( after ) ) );
 		}
 
-		onPasteBlocks( blocks );
-
-		if ( ! isEmpty( before ) || ! onRemove ) {
-			this.onChange( before );
-		} else {
-			onRemove();
-		}
+		onReplace( blocks, blocks.length - 1 );
 	}
 
 	onNodeChange( { parents } ) {
